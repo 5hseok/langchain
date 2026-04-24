@@ -830,6 +830,18 @@ class ChatAnthropic(BaseChatModel):
     usage metadata.
     """
 
+    include_response_headers: bool = False
+    """Whether to include response headers in the output message `response_metadata`.
+
+    When `True`, HTTP response headers from the Anthropic API (such as `request-id`
+    and `anthropic-ratelimit-*`) are attached to `AIMessage.response_metadata` under
+    the `"headers"` key. Useful for correlating application logs with the Anthropic
+    console and accessing rate-limit information.
+
+    For streaming, headers are attached only to the first chunk that carries
+    `response_metadata`.
+    """
+
     thinking: dict[str, Any] | None = Field(default=None)
     """Parameters for Claude reasoning.
 
@@ -1228,10 +1240,22 @@ class ChatAnthropic(BaseChatModel):
             return self._client.beta.messages.create(**payload)
         return self._client.messages.create(**payload)
 
+    def _create_with_raw_response(self, payload: dict) -> Any:
+        if "betas" in payload:
+            return self._client.beta.messages.with_raw_response.create(**payload)
+        return self._client.messages.with_raw_response.create(**payload)
+
     async def _acreate(self, payload: dict) -> Any:
         if "betas" in payload:
             return await self._async_client.beta.messages.create(**payload)
         return await self._async_client.messages.create(**payload)
+
+    async def _acreate_with_raw_response(self, payload: dict) -> Any:
+        if "betas" in payload:
+            return await self._async_client.beta.messages.with_raw_response.create(
+                **payload
+            )
+        return await self._async_client.messages.with_raw_response.create(**payload)
 
     def _stream(
         self,
@@ -1254,6 +1278,9 @@ class ChatAnthropic(BaseChatModel):
                 and not _thinking_in_params(payload)
                 and not _compact_in_params(payload)
             )
+            headers: dict[str, str] | None = None
+            if self.include_response_headers and hasattr(stream, "response"):
+                headers = dict(stream.response.headers)
             block_start_event = None
             for event in stream:
                 msg, block_start_event = self._make_message_chunk_from_anthropic_event(
@@ -1263,6 +1290,12 @@ class ChatAnthropic(BaseChatModel):
                     block_start_event=block_start_event,
                 )
                 if msg is not None:
+                    if headers is not None:
+                        if msg.response_metadata:
+                            msg.response_metadata["headers"] = headers
+                        else:
+                            msg.response_metadata = {"headers": headers}
+                        headers = None
                     chunk = ChatGenerationChunk(message=msg)
                     if run_manager and isinstance(msg.content, str):
                         run_manager.on_llm_new_token(msg.content, chunk=chunk)
@@ -1291,6 +1324,9 @@ class ChatAnthropic(BaseChatModel):
                 and not _thinking_in_params(payload)
                 and not _compact_in_params(payload)
             )
+            headers: dict[str, str] | None = None
+            if self.include_response_headers and hasattr(stream, "response"):
+                headers = dict(stream.response.headers)
             block_start_event = None
             async for event in stream:
                 msg, block_start_event = self._make_message_chunk_from_anthropic_event(
@@ -1300,6 +1336,12 @@ class ChatAnthropic(BaseChatModel):
                     block_start_event=block_start_event,
                 )
                 if msg is not None:
+                    if headers is not None:
+                        if msg.response_metadata:
+                            msg.response_metadata["headers"] = headers
+                        else:
+                            msg.response_metadata = {"headers": headers}
+                        headers = None
                     chunk = ChatGenerationChunk(message=msg)
                     if run_manager and isinstance(msg.content, str):
                         await run_manager.on_llm_new_token(msg.content, chunk=chunk)
@@ -1494,7 +1536,13 @@ class ChatAnthropic(BaseChatModel):
             message_chunk.response_metadata["model_provider"] = "anthropic"
         return message_chunk, block_start_event
 
-    def _format_output(self, data: Any, **kwargs: Any) -> ChatResult:
+    def _format_output(
+        self,
+        data: Any,
+        *,
+        headers: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
         """Format the output from the Anthropic API to LC."""
         data_dict = data.model_dump()
         content = data_dict["content"]
@@ -1526,7 +1574,9 @@ class ChatAnthropic(BaseChatModel):
         ):
             # TODO: dump all `data` with `mode="json"`
             llm_output["container"]["expires_at"] = expires_at.isoformat()
-        response_metadata = {"model_provider": "anthropic"}
+        response_metadata: dict[str, Any] = {"model_provider": "anthropic"}
+        if headers:
+            response_metadata["headers"] = headers
         if "model" in llm_output and "model_name" not in llm_output:
             llm_output["model_name"] = llm_output["model"]
         if (
@@ -1560,11 +1610,17 @@ class ChatAnthropic(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         payload = self._get_request_payload(messages, stop=stop, **kwargs)
+        headers: dict[str, str] | None = None
         try:
-            data = self._create(payload)
+            if self.include_response_headers:
+                raw_response = self._create_with_raw_response(payload)
+                data = raw_response.parse()
+                headers = dict(raw_response.headers)
+            else:
+                data = self._create(payload)
         except anthropic.BadRequestError as e:
             _handle_anthropic_bad_request(e)
-        return self._format_output(data, **kwargs)
+        return self._format_output(data, headers=headers, **kwargs)
 
     async def _agenerate(
         self,
@@ -1574,11 +1630,17 @@ class ChatAnthropic(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         payload = self._get_request_payload(messages, stop=stop, **kwargs)
+        headers: dict[str, str] | None = None
         try:
-            data = await self._acreate(payload)
+            if self.include_response_headers:
+                raw_response = await self._acreate_with_raw_response(payload)
+                data = raw_response.parse()
+                headers = dict(raw_response.headers)
+            else:
+                data = await self._acreate(payload)
         except anthropic.BadRequestError as e:
             _handle_anthropic_bad_request(e)
-        return self._format_output(data, **kwargs)
+        return self._format_output(data, headers=headers, **kwargs)
 
     def _get_llm_for_structured_output_when_thinking_is_enabled(
         self,

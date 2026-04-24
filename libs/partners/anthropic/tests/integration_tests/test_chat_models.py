@@ -2516,3 +2516,57 @@ def test_compaction_streaming() -> None:
     third_response = llm.invoke(messages)
     content_blocks = third_response.content_blocks
     assert [block["type"] for block in content_blocks] == ["text"]
+
+
+def _assert_anthropic_request_id(headers: dict) -> None:
+    assert isinstance(headers, dict)
+    assert headers
+    # Anthropic uses `request-id` (lowercased by httpx).
+    assert any(key.lower() in ("request-id", "x-request-id") for key in headers), (
+        f"no request-id in headers: {list(headers)}"
+    )
+
+
+def test_include_response_headers_invoke() -> None:
+    """`invoke` surfaces response headers when `include_response_headers=True`."""
+    llm = ChatAnthropic(model=MODEL_NAME, include_response_headers=True)
+    result = llm.invoke("Hi")
+    headers = result.response_metadata["headers"]
+    _assert_anthropic_request_id(headers)
+
+
+async def test_include_response_headers_ainvoke() -> None:
+    """`ainvoke` surfaces response headers when `include_response_headers=True`."""
+    llm = ChatAnthropic(model=MODEL_NAME, include_response_headers=True)
+    result = await llm.ainvoke("Hi")
+    headers = result.response_metadata["headers"]
+    _assert_anthropic_request_id(headers)
+
+
+def test_include_response_headers_stream() -> None:
+    """`stream` attaches headers to the accumulated message."""
+    llm = ChatAnthropic(model=MODEL_NAME, include_response_headers=True)
+    full: BaseMessageChunk | None = None
+    for chunk in llm.stream("Hi"):
+        full = chunk if full is None else full + chunk
+    assert full is not None
+    headers = full.response_metadata["headers"]
+    _assert_anthropic_request_id(headers)
+
+
+async def test_include_response_headers_astream() -> None:
+    """`astream` attaches headers to the accumulated message."""
+    llm = ChatAnthropic(model=MODEL_NAME, include_response_headers=True)
+    full: BaseMessageChunk | None = None
+    async for chunk in llm.astream("Hi"):
+        full = chunk if full is None else full + chunk
+    assert full is not None
+    headers = full.response_metadata["headers"]
+    _assert_anthropic_request_id(headers)
+
+
+def test_include_response_headers_default_is_false() -> None:
+    """Without the opt-in flag, headers should not leak into response_metadata."""
+    llm = ChatAnthropic(model=MODEL_NAME)
+    result = llm.invoke("Hi")
+    assert "headers" not in result.response_metadata
